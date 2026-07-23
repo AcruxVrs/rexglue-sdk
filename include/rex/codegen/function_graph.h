@@ -184,7 +184,11 @@ class FunctionGraph {
   // callerAddr: address of the branch instruction
   // isCallInstruction: true for bl (expects return), false for b (no return)
   // Returns how the target should be treated during code generation.
-  TargetKind classifyTarget(uint32_t target, uint32_t callerAddr, bool isCallInstruction) const;
+  // caller: the function being emitted - its discovered blocks decide what is
+  // internal, keeping emit-time classification aligned with the scanner's
+  // isInternalTarget.
+  TargetKind classifyTarget(uint32_t target, const FunctionNode& caller,
+                            bool isCallInstruction) const;
 
  private:
   std::vector<CodeBuffer> codeBuffers_;

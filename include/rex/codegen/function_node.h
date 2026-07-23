@@ -109,6 +109,12 @@ class FunctionNode {
   const std::vector<Block>& blocks() const { return blocks_; }
   bool containsAddress(uint32_t addr) const;
 
+  // Strict block coverage: true only if a discovered block contains addr.
+  // Unlike containsAddress, no CONFIG/PDATA declared-size fallback - use this
+  // when a `goto loc_<addr>` will be emitted, since labels only exist inside
+  // emitted blocks.
+  bool hasBlockCovering(uint32_t addr) const;
+
   // Check if address is within overall function bounds (ignores blocks)
   // Use this for branch target detection where address may be in a gap between blocks
   bool isWithinBounds(uint32_t addr) const { return addr >= base_ && addr < base_ + size_; }

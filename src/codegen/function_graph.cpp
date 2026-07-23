@@ -145,6 +145,15 @@ void FunctionNode::addBlock(Block block) {
   }
 }
 
+bool FunctionNode::hasBlockCovering(uint32_t addr) const {
+  for (const auto& block : blocks_) {
+    if (block.contains(addr)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool FunctionNode::containsAddress(uint32_t addr) const {
   // First check overall bounds
   if (addr < base_ || addr >= base_ + size_) {
@@ -478,9 +487,20 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
     name = fmt::format("sub_{:08X}", base());
   }
 
+  // Pre-entry blocks: backward conditional flow duplicated from the function
+  // this entry was carved out of. They are emitted in address order before
+  // the entry, so execution must first jump to the entry label.
+  const bool hasPreEntryBlocks = !blocks().empty() && blocks().front().base < base();
+  if (hasPreEntryBlocks) {
+    labels.emplace(base());
+  }
+
   // Function signature with weak/alias pattern
   emit_println(out, "DEFINE_REX_FUNC({}) {{", name);
   emit_println(out, "\tREX_FUNC_PROLOGUE();");
+  if (hasPreEntryBlocks) {
+    emit_println(out, "\tgoto loc_{:X};", base());
+  }
 
   // --- Second pass: emit instruction code ---
   const JumpTable* activeJt = nullptr;
@@ -1171,37 +1191,45 @@ bool FunctionGraph::isMergeableEntryPoint(uint32_t addr) const {
   return node->authority() == FunctionAuthority::GAP_FILL;
 }
 
-TargetKind FunctionGraph::classifyTarget(uint32_t target, uint32_t callerAddr,
+TargetKind FunctionGraph::classifyTarget(uint32_t target, const FunctionNode& caller,
                                          bool isCallInstruction) const {
-  // Find the caller's function
-  const FunctionNode* callerFn = getFunctionContaining(callerAddr);
-
   // Case 1: Target is an import - always a call/tail-call
   if (isImport(target)) {
     return TargetKind::Import;
   }
 
-  // Case 2: Target is the caller's own entry point
-  if (callerFn && target == callerFn->base()) {
-    // bl to own base = recursive call (Function)
-    // b to own base = loop back to start (InternalLabel)
-    return isCallInstruction ? TargetKind::Function : TargetKind::InternalLabel;
+  if (isCallInstruction) {
+    // Case 2 (bl): a function entry always wins - bl to an entry is a real
+    // call (including bl to our own base = recursion), even when the caller's
+    // blocks happen to flow across that address. A call must never goto.
+    if (isEntryPoint(target)) {
+      return TargetKind::Function;
+    }
+    // Case 3 (bl): bl into our own blocks - rare PIC pattern (bl to get PC
+    // into LR). Discovery walked the target, so a label exists.
+    if (caller.hasBlockCovering(target)) {
+      return TargetKind::InternalLabel;
+    }
+    return TargetKind::Unknown;
   }
 
-  // Case 3: Target is a DIFFERENT function's entry point - this is a call/tail-call
-  // This handles cases where a small thunk function branches to another function
-  // whose entry point happens to fall within the thunk's address range
+  // Case 2 (b/bc): discovery's decision wins. A target the scanner walked
+  // into the caller's blocks has an emitted label, and a goto reproduces the
+  // guest jump exactly - even if the address was later also registered as a
+  // function entry. This keeps emit-time classification aligned with the
+  // scanner's isInternalTarget instead of re-deriving internality from a
+  // graph that may have gained entries after this function was discovered.
+  if (caller.hasBlockCovering(target)) {
+    return TargetKind::InternalLabel;
+  }
+
+  // Case 3 (b/bc): the scanner treated the target as external; an entry
+  // point is a tail call (includes shared-tail targets crossing an entry).
   if (isEntryPoint(target)) {
     return TargetKind::Function;
   }
 
-  // Case 4: Target is inside caller's function -> InternalLabel
-  // For bl, this would be a rare PIC code pattern
-  if (callerFn && callerFn->containsAddress(target)) {
-    return TargetKind::InternalLabel;
-  }
-
-  // Case 5: Unknown target
+  // Case 4: Unknown target
   return TargetKind::Unknown;
 }
 

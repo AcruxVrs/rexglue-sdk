@@ -1824,13 +1824,23 @@ BlockDiscoveryResult discoverBlocks(
   // Function extent - use pdataSize when available
   uint32_t funcEnd = (pdataSize > 0) ? (entryPoint + pdataSize) : containingRegion.end;
 
+  // Scan floor for backward conditional flow. A function whose entry sits
+  // inside another function's body (shared tail / mid-body entry) may branch
+  // conditionally back into the code it was carved out of; those blocks get
+  // duplicated into this function so the branch stays a CFG edge. Blocks
+  // below the entry are only ever reached through actual bc targets (bounded
+  // to +-32KB by the BD displacement field), so the region start is a safe
+  // floor.
+  const uint32_t scanFloor = containingRegion.start;
+
   REXCODEGEN_TRACE(
       "discoverBlocks: entry=0x{:08X} pdataSize={} funcEnd=0x{:08X} region=[0x{:08X}-0x{:08X}]",
       entryPoint, pdataSize, funcEnd, containingRegion.start, containingRegion.end);
 
-  // Helper to check if address is within function bounds
+  // Helper to check if address is within function bounds (including the
+  // pre-entry range reachable through backward conditional branches)
   auto isWithinFunction = [&](uint32_t addr) -> bool {
-    return addr >= entryPoint && addr < funcEnd;
+    return addr >= scanFloor && addr < funcEnd;
   };
 
   // Start with entry point
@@ -1869,11 +1879,17 @@ BlockDiscoveryResult discoverBlocks(
       if (isBranch(*insn)) {
         auto target = getBranchTarget(*insn);
 
-        // Helper: check if target is internal to this function
-        // Uses funcEnd (from pdataSize or region) defined at top of function
-        auto isInternalTarget = [&](uint32_t t) -> bool {
+        // Helper: check if target is internal to this function.
+        // Uses funcEnd (from pdataSize or region) defined at top of function.
+        //
+        // strict=true keeps the entry point as the lower bound (bl and
+        // unconditional b - their externals resolve as calls/tail calls).
+        // Conditional branches use the scan floor instead: a conditional
+        // target can never be promoted to a function, so backward flow into
+        // the code this entry was carved out of must stay a CFG edge.
+        auto isInternalTarget = [&](uint32_t t, bool strict) -> bool {
           // Must be within function bounds
-          if (t < entryPoint || t >= funcEnd) {
+          if (t < (strict ? entryPoint : scanFloor) || t >= funcEnd) {
             return false;
           }
           // Must not be a known function entry (except our own entry point)
@@ -1891,7 +1907,7 @@ BlockDiscoveryResult discoverBlocks(
             result.unresolvedBranches.push_back({addr, *target, true, false});
 
             // Track as external call for function discovery
-            if (!isInternalTarget(*target)) {
+            if (!isInternalTarget(*target, /*strict=*/true)) {
               result.externalCalls.push_back(*target);
             }
           }
@@ -1907,7 +1923,7 @@ BlockDiscoveryResult discoverBlocks(
           // conditional-branch case below) so the rest of the function is not
           // dropped. The CTR target is indirect and has no static label.
           uint32_t fallthrough = addr + 4;
-          if (isInternalTarget(fallthrough)) {
+          if (isInternalTarget(fallthrough, /*strict=*/false)) {
             result.labels.insert(fallthrough);
             if (!visited.contains(fallthrough) && !blockStarts.contains(fallthrough)) {
               blockStarts.insert(fallthrough);
@@ -1984,8 +2000,9 @@ BlockDiscoveryResult discoverBlocks(
           block.size = addr - blockStart + 4;
           break;
         } else if (isConditional(*insn)) {
-          // Conditional branch - follow both paths
-          if (target && isInternalTarget(*target)) {
+          // Conditional branch - follow both paths. Non-strict: conditional
+          // targets stay CFG edges (see isInternalTarget).
+          if (target && isInternalTarget(*target, /*strict=*/false)) {
             result.labels.insert(*target);
             if (!visited.contains(*target) && !blockStarts.contains(*target)) {
               blockStarts.insert(*target);
@@ -1997,7 +2014,7 @@ BlockDiscoveryResult discoverBlocks(
           }
           // CRITICAL: Fall-through also needs a label
           uint32_t fallthrough = addr + 4;
-          if (isInternalTarget(fallthrough)) {
+          if (isInternalTarget(fallthrough, /*strict=*/false)) {
             result.labels.insert(fallthrough);
             if (!visited.contains(fallthrough) && !blockStarts.contains(fallthrough)) {
               blockStarts.insert(fallthrough);
@@ -2007,7 +2024,7 @@ BlockDiscoveryResult discoverBlocks(
         } else {
           // Unconditional branch
           if (target) {
-            if (isInternalTarget(*target)) {
+            if (isInternalTarget(*target, /*strict=*/true)) {
               // Internal unconditional branch (includes backward branches)
               result.labels.insert(*target);
               if (!visited.contains(*target) && !blockStarts.contains(*target)) {

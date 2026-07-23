@@ -253,7 +253,7 @@ void BuilderContext::emit_conditional_branch(bool not_, std::string_view cond) {
 
   // Use classifyTarget for consistent branch classification
   // false = branch instruction (not a call), so own-base means loop back
-  auto kind = graph().classifyTarget(target, base, false);
+  auto kind = graph().classifyTarget(target, fn, false);
 
   switch (kind) {
     case TargetKind::InternalLabel:
@@ -290,12 +290,22 @@ void BuilderContext::emit_conditional_branch(bool not_, std::string_view cond) {
       }
       break;
 
-    case TargetKind::Unknown:
-      REXCODEGEN_ERROR("Unresolved conditional branch to 0x{:08X} from 0x{:08X}", target, base);
+    case TargetKind::Unknown: {
+      // Name the emitting function's extent and the target's owner (if any)
+      // so boundary problems are diagnosable straight from the log.
+      const auto* owner = graph().getFunctionContaining(target);
+      REXCODEGEN_ERROR(
+          "Unresolved conditional branch to 0x{:08X} from 0x{:08X} (emitting fn {} "
+          "0x{:08X}-0x{:08X}, target {})",
+          target, base, fn.name(), fn.base(), fn.end(),
+          owner ? fmt::format("inside {} 0x{:08X}-0x{:08X}", owner->name(), owner->base(),
+                              owner->end())
+                : std::string("not in any function"));
       println("\t// ERROR: conditional branch to unknown address 0x{:08X}", target);
       println("\tif ({}{}.{}) REX_FATAL(\"Unresolved branch from 0x{:08X} to 0x{:08X}\");",
               not_ ? "!" : "", cr(insn.operands[0]), cond, base, target);
       break;
+    }
   }
 }
 
