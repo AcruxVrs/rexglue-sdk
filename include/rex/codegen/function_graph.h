@@ -181,12 +181,11 @@ class FunctionGraph {
 
   // Classify a branch target for code generation.
   // target: address being branched to
-  // callerAddr: address of the branch instruction
+  // caller: the function being emitted - its discovered blocks decide what is
+  //         internal, keeping emit-time classification aligned with the
+  //         scanner's isInternalTarget
   // isCallInstruction: true for bl (expects return), false for b (no return)
   // Returns how the target should be treated during code generation.
-  // caller: the function being emitted - its discovered blocks decide what is
-  // internal, keeping emit-time classification aligned with the scanner's
-  // isInternalTarget.
   TargetKind classifyTarget(uint32_t target, const FunctionNode& caller,
                             bool isCallInstruction) const;
 
